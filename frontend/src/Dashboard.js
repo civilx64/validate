@@ -2,7 +2,8 @@ import Dz from './Dz'
 import ResponsiveAppBar from './ResponsiveAppBar'
 import DashboardTable from './DashboardTable'
 import Disclaimer from './Disclaimer';
-import Footer from './Footer'
+import Footer from './Footer';
+import FeedbackWidget from './FeedbackWidget';
 import Grid from '@mui/material/Grid';
 import VerticalLinearStepper from './VerticalLinearStepper'
 import Button from '@mui/material/Button';
@@ -27,7 +28,7 @@ function Dashboard() {
   const context = useContext(PageContext);
 
   useEffect(() => {
-    fetch(context.sandboxId ? `${FETCH_PATH}/api/sandbox/me/${context.sandboxId}` : `${FETCH_PATH}/api/me`)
+    fetch(context.sandboxId ? `${FETCH_PATH}/api/sandbox/me/${context.sandboxId}` : `${FETCH_PATH}/api/me`, { credentials: 'include' })
       .then(response => response.json())
       .then((data) => {
         if (data["redirect"] !== undefined && data["redirect"] !== null) {
@@ -126,6 +127,9 @@ function Dashboard() {
               </div>
             </Grid>
           </Grid>
+
+          <FeedbackWidget user={user} />
+
         </Grid>
       </div>
     );

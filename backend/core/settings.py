@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 
 import os
 import logging
+import ast
 
 from dotenv import load_dotenv
 from pathlib import Path
@@ -25,13 +26,18 @@ CURRENT_DIR = Path(__file__).resolve().parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get(
-    "SECRET_KEY", "django-insecure-um7-^+&jbk_=80*xcc9uf4nh$4koida7)ja&6!vb*$8@n288jk"
+    "DJANGO_SECRET_KEY", "django-insecure-um7-^+&jbk_=80*xcc9uf4nh$4koida7)ja&6!vb*$8@n288jk"
 )
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get("DEBUG", False)
-DEVELOPMENT = os.environ.get('ENV', 'PROD').upper() in ('DEV', 'DEVELOPMENT')
+DEVELOPMENT = os.environ.get('ENV', 'PROD').upper() in ('DEV', 'DEVELOP', 'DEVELOPMENT')
+STAGING = os.environ.get('ENV', 'PROD').upper() in ('STAGE', 'STAGING', 'QA')
+PRODUCTION = os.environ.get('ENV', 'PROD').upper() in ('PROD', 'PRODUCTION', 'PRD')
 PUBLIC_URL = os.getenv('PUBLIC_URL').strip('/') if os.getenv('PUBLIC_URL') is not None else None
+
+# URL for rule hyperlinks; by default points to bSI Gherkin Rules repo (main)
+FEATURE_URL = os.getenv('FEATURE_URL', 'https://github.com/buildingSMART/ifc-gherkin-rules/blob/main/features/')
 
 ALLOWED_HOSTS = ["127.0.0.1", "0.0.0.0", "localhost", "backend"]
 
@@ -47,18 +53,20 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
 
-    "corsheaders",                 # CORS
-    "rest_framework",              # DRF
+    "corsheaders",                       # CORS
+    "rest_framework",                    # DRF
     "rest_framework.authtoken",
-    "drf_spectacular",             # OpenAPI/Swagger
-    "drf_spectacular_sidecar",     # required for Django collectstatic discovery
+    "drf_spectacular",                   # OpenAPI/Swagger
+    "drf_spectacular_sidecar",           # required for Django collectstatic discovery
+    
+    "django_celery_results",             # Celery result backend
+    "django_celery_beat",                # Celery scheduled tasks
 
-    "django_celery_results",       # Celery result backend
-    "django_celery_beat",          # Celery scheduled tasks
+    "apps.ifc_validation",               # IfcValidation Service
+    "apps.ifc_validation_models",        # IfcValidation Data Model
+    "apps.ifc_validation_bff",           # IfcValidation ReactUI BFF
 
-    "apps.ifc_validation",         # IfcValidation Service
-    "apps.ifc_validation_models",  # IfcValidation Data Model
-    "apps.ifc_validation_bff",     # IfcValidation ReactUI BFF
+    "django_cleanup.apps.CleanupConfig"  # to automatically remove unlinked files
 ]
 
 if DEVELOPMENT:
@@ -85,7 +93,12 @@ MIDDLEWARE = [
 
 SESSION_ENGINE = 'django.contrib.sessions.backends.db'
 
-CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_ALL_ORIGINS = False
+CORS_ALLOWED_ORIGINS = []
+if os.environ.get("DJANGO_TRUSTED_ORIGINS") is not None:
+    CORS_ALLOWED_ORIGINS += os.environ.get("DJANGO_TRUSTED_ORIGINS").split(" ")
+
 CORS_ALLOW_METHODS = [
     'DELETE',
     'GET',
@@ -102,17 +115,16 @@ CORS_ALLOW_HEADERS = [
     'dnt',
     'origin',
     'user-agent',
-    'x-csrftoken',
     'x-requested-with',
-
+    'x-csrf-token',
     'cache-control' # extra header
 ]
 
-CSRF_TRUSTED_ORIGINS = [ 
-    'https://dev.validate.buildingsmart.org' 
-]
-if os.environ.get("DJANGO_CSRF_TRUSTED_ORIGINS") is not None:
-    CSRF_TRUSTED_ORIGINS += os.environ.get("DJANGO_CSRF_TRUSTED_ORIGINS").split(" ")
+CSRF_COOKIE_NAME = 'csrftoken'
+CSRF_HEADER_NAME = 'HTTP_X_CSRF_TOKEN'
+CSRF_TRUSTED_ORIGINS = []
+if os.environ.get("DJANGO_TRUSTED_ORIGINS") is not None:
+    CSRF_TRUSTED_ORIGINS += os.environ.get("DJANGO_TRUSTED_ORIGINS").split(" ")
 
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
@@ -350,6 +362,10 @@ LOGIN_URL = os.environ.get("LOGIN_URL", f"{PUBLIC_URL}/login")
 LOGOUT_URL = os.environ.get("LOGOUT_URL", f"{PUBLIC_URL}/logout")
 LOGIN_CALLBACK_URL = os.environ.get("CALLBACK_URL", f"{PUBLIC_URL}/callback")
 POST_LOGIN_REDIRECT_URL = os.environ.get("POST_LOGIN_REDIRECT_URL", f"{PUBLIC_URL}/dashboard")
+
+# whitelisting of users
+USE_WHITELIST = ast.literal_eval(os.environ.get("USE_WHITELIST", 'False'))
+
 
 AUTHLIB_OAUTH_CLIENTS = {
     'b2c': {

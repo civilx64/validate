@@ -46,7 +46,7 @@ def get_absolute_file_path(file_name):
 
     logger.debug(f"get_absolute_file_path(): file_name={file_name} returned '{ifc_fn}'")
     return ifc_fn
-    
+
 
 @shared_task(bind=True)
 @log_execution
@@ -59,7 +59,7 @@ def error_handler(self, *args, **kwargs):
 @log_execution
 def chord_error_handler(self, request, exc, traceback, *args, **kwargs):
 
-    on_workflow_failed.apply_async(request, exc, traceback, *args, **kwargs)
+    on_workflow_failed.apply_async([request, exc, traceback])
 
 
 @shared_task(bind=True)
@@ -110,7 +110,7 @@ def on_workflow_failed(self, *args, **kwargs):
     reason = f"Processing failed: args={args} kwargs={kwargs}"
     request = ValidationRequest.objects.get(pk=id)
     request.mark_as_failed(reason)
-   
+
     # queue sending email
     send_failure_email_task.delay(id=id, file_name=request.file_name)
 
@@ -156,7 +156,6 @@ def ifc_file_validation_task(self, id, file_name, *args, **kwargs):
 
     workflow_started = on_workflow_started.s(id, file_name)
     workflow_completed = on_workflow_completed.s(id, file_name)
-    workflow_failed = on_workflow_failed.s(id, file_name)
 
     serial_tasks = chain(
         syntax_validation_subtask.s(id, file_name),
@@ -166,7 +165,7 @@ def ifc_file_validation_task(self, id, file_name, *args, **kwargs):
 
     parallel_tasks = group([
         schema_validation_subtask.s(id, file_name),
-        bsdd_validation_subtask.s(id, file_name),
+        #bsdd_validation_subtask.s(id, file_name), # disabled
         normative_rules_ia_validation_subtask.s(id, file_name),
         normative_rules_ip_validation_subtask.s(id, file_name),
         industry_practices_subtask.s(id, file_name)
@@ -186,19 +185,34 @@ def ifc_file_validation_task(self, id, file_name, *args, **kwargs):
     workflow.set(link_error=[error_task])
     workflow.apply_async()
 
+
 @shared_task(bind=True)
 @log_execution
 @requires_django_user_context
 def instance_completion_subtask(self, prev_result, id, file_name, *args, **kwargs):
-    request = ValidationRequest.objects.get(pk=id)
-    file_path = get_absolute_file_path(request.file.name)
 
-    ifc_file = ifcopenshell.open(file_path)
+    prev_result_succeeded = prev_result is not None and prev_result[0]['is_valid'] is True
+    if prev_result_succeeded:
 
-    with transaction.atomic():
-        for inst in request.model.instances.iterator():
-            inst.ifc_type = ifc_file[inst.stepfile_id].is_a()
-            inst.save()
+        request = ValidationRequest.objects.get(pk=id)
+        file_path = get_absolute_file_path(request.file.name)
+
+        try:
+            ifc_file = ifcopenshell.open(file_path)
+        except:
+            logger.warning(f'Failed to open {file_path}. Likely previous tasks also failed.')
+            ifc_file = None
+
+        if ifc_file:
+            with transaction.atomic():
+                for inst in request.model.instances.iterator():
+                    inst.ifc_type = ifc_file[inst.stepfile_id].is_a()
+                    inst.save()
+
+    else:
+        reason = f'Skipped as prev_result = {prev_result}.'
+        #task.mark_as_skipped(reason)
+        return {'is_valid': None, 'reason': reason}
 
 
 @shared_task(bind=True)
@@ -239,7 +253,8 @@ def syntax_validation_subtask(self, prev_result, id, file_name, *args, **kwargs)
 
         # parse output
         output = proc.stdout
-        success = len(list(filter(None, output.split("\n")))) == 0
+        error_output = proc.stderr
+        success = (len(list(filter(None, output.split("\n")))) == 0) and len(proc.stderr) == 0
 
         with transaction.atomic():
 
@@ -254,16 +269,25 @@ def syntax_validation_subtask(self, prev_result, id, file_name, *args, **kwargs)
                     outcome_code=ValidationOutcome.ValidationOutcomeCode.PASSED,
                     observed=output if output != '' else None
                 )
-                model.save()
+
+            elif len(error_output) != 0:
+                model.status_syntax = Model.Status.INVALID
+                task.outcomes.create(
+                    severity=ValidationOutcome.OutcomeSeverity.ERROR,
+                    outcome_code=ValidationOutcome.ValidationOutcomeCode.SYNTAX_ERROR,
+                    observed=list(filter(None, proc.stderr.split("\n")))[-1] # last line of traceback
+                )
+
             else:
                 messages = json.loads(output)
                 model.status_syntax = Model.Status.INVALID
                 task.outcomes.create(
                     severity=ValidationOutcome.OutcomeSeverity.ERROR,
                     outcome_code=ValidationOutcome.ValidationOutcomeCode.SYNTAX_ERROR,
-                    observed=messages['message']
+                    observed=messages['message'] if 'message' in messages else None
                 )
-                model.save()
+
+            model.save(update_fields=['status_syntax'])
 
             # store and return
             if success:
@@ -271,7 +295,7 @@ def syntax_validation_subtask(self, prev_result, id, file_name, *args, **kwargs)
                 task.mark_as_completed(reason)
                 return {'is_valid': True, 'reason': task.status_reason}
             else:
-                reason = f"Found IFC syntax errors: {output}"
+                reason = f"Found IFC syntax errors:\n\nConsole: \n{output}\n\nError: {error_output}"
                 task.mark_as_completed(reason)
                 return {'is_valid': False, 'reason': reason}
 
@@ -330,19 +354,24 @@ def parse_info_subtask(self, prev_result, id, file_name, *args, **kwargs):
                 model.date = None
                 try:
                     ifc_file_time_stamp = f'{ifc_file.header.file_name.time_stamp}'
-                    logger.debug(f'Timestamp within file = {ifc_file_time_stamp}')
-                    date = datetime.datetime.strptime(ifc_file_time_stamp, "%Y-%m-%dT%H:%M:%S")
-                    date_with_tz = datetime.datetime(
-                        date.year, 
-                        date.month, 
-                        date.day, 
-                        date.hour, 
-                        date.minute, 
-                        date.second, 
-                        tzinfo=datetime.timezone.utc)
-                    model.date = date_with_tz
-                except ValueError:
-                    model.date = datetime.datetime.fromisoformat(ifc_file_time_stamp)
+                except RuntimeError:
+                    ifc_file_time_stamp = None
+                    model.date = None
+                if ifc_file_time_stamp:
+                    try:
+                        logger.debug(f'Timestamp within file = {ifc_file_time_stamp}')
+                        date = datetime.datetime.strptime(ifc_file_time_stamp, "%Y-%m-%dT%H:%M:%S")
+                        date_with_tz = datetime.datetime(
+                            date.year, 
+                            date.month, 
+                            date.day, 
+                            date.hour, 
+                            date.minute, 
+                            date.second, 
+                            tzinfo=datetime.timezone.utc)
+                        model.date = date_with_tz
+                    except ValueError:
+                        model.date = datetime.datetime.fromisoformat(ifc_file_time_stamp)
                 logger.debug(f'Detected date = {model.date}')
 
                 # MVD
@@ -353,8 +382,14 @@ def parse_info_subtask(self, prev_result, id, file_name, *args, **kwargs):
                 logger.debug(f'Detected MVD = {model.mvd}')
 
                 # authoring app
-                app = ifc_file.by_type("IfcApplication")[0].ApplicationFullName if len(ifc_file.by_type("IfcApplication")) > 0 else None
-                version = ifc_file.by_type("IfcApplication")[0].Version if len(ifc_file.by_type("IfcApplication")) > 0 else None
+                try:
+                    app = ifc_file.by_type("IfcApplication")[0].ApplicationFullName if len(ifc_file.by_type("IfcApplication")) > 0 else None
+                except RuntimeError:
+                    app = None
+                try:
+                    version = ifc_file.by_type("IfcApplication")[0].Version if len(ifc_file.by_type("IfcApplication")) > 0 else None
+                except RuntimeError:
+                    version = None
                 name = None if (app is None and version is None) else (None if version is None else app + ' ' + version)
                 logger.debug(f'Detected Authoring Tool in file = {name}')
 
@@ -366,7 +401,7 @@ def parse_info_subtask(self, prev_result, id, file_name, *args, **kwargs):
                         logger.debug(f'Retrieved existing Authoring Tool from DB = {model.produced_by.full_name}')
 
                     elif authoring_tool is None:
-                        authoring_tool = AuthoringTool.objects.create(
+                        authoring_tool, _ = AuthoringTool.objects.get_or_create(
                             name=app,
                             version=version
                         )
@@ -470,7 +505,7 @@ def prerequisites_subtask(self, prev_result, id, file_name, *args, **kwargs):
             # update Model info
             agg_status = task.determine_aggregate_status()
             model.status_prereq = agg_status
-            model.save()
+            model.save(update_fields=['status_prereq'])
 
             # update Task info and return
             is_valid = agg_status != Model.Status.INVALID
@@ -501,7 +536,8 @@ def schema_validation_subtask(self, prev_result, id, file_name, *args, **kwargs)
     # add task
     task = ValidationTask.objects.create(request=request, type=ValidationTask.Type.SCHEMA)
 
-    prev_result_succeeded = prev_result is not None and prev_result['is_valid'] is True
+    # TODO: revisit schema validation task, perhaps change order of flow?
+    prev_result_succeeded = prev_result is not None and (prev_result['is_valid'] is True or 'Unsupported schema' in prev_result['reason'])
     if prev_result_succeeded:
 
         task.mark_as_initiated()
@@ -532,8 +568,21 @@ def schema_validation_subtask(self, prev_result, id, file_name, *args, **kwargs)
             task.mark_as_failed(err)
             raise
 
-        output = list(filter(None, proc.stdout.split("\n")))
-        success = (len(output) == 0)
+        # schema check returns either multiple JSON lines, or a single line message, or nothing.        
+        def is_schema_error(line):
+            try:
+                json.loads(line) # ignoring non-JSON messages
+            except ValueError:
+                return False
+            return True
+        
+        output = list(filter(is_schema_error, proc.stdout.split("\n")))
+        # success = (len(output) == 0)
+        # tfk: if we mark this task as failed we don't do the instance population either.
+        # marking as failed should probably be reserved for blocking errors (prerequisites)
+        # and internal errors and differentiate between valid and task_success.
+        success = proc.returncode == 0
+        valid = (len(output) == 0)
 
         with transaction.atomic():
 
@@ -541,14 +590,13 @@ def schema_validation_subtask(self, prev_result, id, file_name, *args, **kwargs)
             model = get_or_create_ifc_model(id)
 
             # update Model and Validation Outcomes
-            if success:
+            if valid:
                 model.status_schema = Model.Status.VALID
                 task.outcomes.create(
                     severity=ValidationOutcome.OutcomeSeverity.PASSED,
                     outcome_code=ValidationOutcome.ValidationOutcomeCode.PASSED,
                     observed=None
                 )
-                model.save()
             else:
                 for line in output:
                     message = json.loads(line)
@@ -572,7 +620,7 @@ def schema_validation_subtask(self, prev_result, id, file_name, *args, **kwargs)
                         outcome.instance = instance
                         outcome.save()
 
-                model.save()
+            model.save(update_fields=['status_schema'])
 
             # return
             if success:
@@ -643,50 +691,50 @@ def bsdd_validation_subtask(self, prev_result, id, file_name, *args, **kwargs):
             task.mark_as_failed(error_message)
             raise RuntimeError(error_message)
 
-        output = list(filter(None, proc.stdout.split("\n")))
-        success = (len(output) <= 1)
-        no_bsdd_classification = success and 'No IfcClassification' in output[0]
+        raw_output = proc.stdout
 
-        logger.info(f'Output for {self.__name__}: {output}')
+        logger.info(f'Output for {self.__name__}: {raw_output}')
 
         with transaction.atomic():
 
             # create or retrieve Model info
             model = get_or_create_ifc_model(id)
 
+            # update Validation Outcomes
+            json_output = json.loads(raw_output)
+            for message in json_output['messages']:
+
+                outcome = task.outcomes.create(
+                    severity=[c[0] for c in ValidationOutcome.OutcomeSeverity.choices if c[1] == (message['severity'])][0],
+                    outcome_code=[c[0] for c in ValidationOutcome.ValidationOutcomeCode.choices if c[1] == (message['outcome'])][0],
+                    observed=message['message'],
+                    feature=json.dumps({
+                        'rule': message['rule'] if 'rule' in message else None,
+                        'category': message['category'] if 'category' in message else None,
+                        'dictionary': message['dictionary'] if 'dictionary' in message else None,
+                        'class': message['class'] if 'class' in message else None,
+                        'instance_id': message['instance_id'] if 'instance_id' in message else None
+                    })                    
+                )
+
+                if 'instance_id' in message and message['instance_id'] is not None:
+                    instance, _ = model.instances.get_or_create(
+                        stepfile_id = message['instance_id'],
+                        model=model
+                    )
+                    outcome.instance = instance
+                    outcome.save()
+            
             # update Model info
-            if no_bsdd_classification:
-                model.status_bsdd = Model.Status.NOT_APPLICABLE
-                task.outcomes.create(
-                    severity=ValidationOutcome.OutcomeSeverity.NOT_APPLICABLE,
-                    observed='\n'.join(line.strip() for line in output)
-                )
-                model.save()
+            agg_status = task.determine_aggregate_status()
+            model.status_bsdd = agg_status
+            model.save(update_fields=['status_bsdd'])
 
-            elif success:
-                model.status_bsdd = Model.Status.VALID
-                task.outcomes.create(
-                    severity=ValidationOutcome.OutcomeSeverity.PASSED,
-                    observed='\n'.join(line.strip() for line in output)
-                )
-                model.save()
-
-            else:
-                model.status_bsdd = Model.Status.INVALID
-                task.outcomes.create(
-                    severity=ValidationOutcome.OutcomeSeverity.ERROR,
-                    observed='\n'.join(line.strip() for line in output)
-                )
-                model.save()
-
-            if no_bsdd_classification or success:
-                reason = '\n'.join(line.strip() for line in output)
-                task.mark_as_completed(reason)
-                return {'is_valid': True, 'reason': reason}
-            else:
-                reason = '\n'.join(line.strip() for line in output)
-                task.mark_as_completed(reason)
-                return {'is_valid': False, 'reason': reason}
+            # update Task info and return
+            is_valid = agg_status != Model.Status.INVALID
+            reason = f"agg_status = {Model.Status(agg_status).label}\nmessages = {json_output['messages']}"
+            task.mark_as_completed(reason)
+            return {'is_valid': is_valid, 'reason': reason}
 
     else:
         reason = f'Skipped as prev_result = {prev_result}.'
@@ -758,7 +806,7 @@ def normative_rules_ia_validation_subtask(self, prev_result, id, file_name, *arg
             agg_status = task.determine_aggregate_status()
             logger.debug(f'Aggregate status for {self.__qualname__}: {agg_status}')
             model.status_ia = agg_status
-            model.save()
+            model.save(update_fields=['status_ia'])
 
             # update Task info and return
             is_valid = agg_status != Model.Status.INVALID
@@ -834,7 +882,7 @@ def normative_rules_ip_validation_subtask(self, prev_result, id, file_name, *arg
             # update Model info
             agg_status = task.determine_aggregate_status()
             model.status_ip = agg_status
-            model.save()
+            model.save(update_fields=['status_ip'])
 
             # update Task info and return
             is_valid = agg_status != Model.Status.INVALID
@@ -910,7 +958,7 @@ def industry_practices_subtask(self, prev_result, id, file_name, *args, **kwargs
             # update Model info
             agg_status = task.determine_aggregate_status()
             model.status_industry_practices = agg_status
-            model.save()
+            model.save(update_fields=['status_industry_practices'])
 
             # update Task info and return
             is_valid = agg_status != Model.Status.INVALID
@@ -922,4 +970,3 @@ def industry_practices_subtask(self, prev_result, id, file_name, *args, **kwargs
         reason = f'Skipped as prev_result = {prev_result}.'
         task.mark_as_skipped(reason)
         return {'is_valid': None, 'reason': reason}
-

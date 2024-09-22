@@ -29,6 +29,7 @@ import { FETCH_PATH } from './environment'
 import { useEffect, useState, useContext } from 'react';
 import { PageContext } from './Page';
 import HandleAsyncError from './HandleAsyncError';
+import { getCookieValue } from './Cookies';
 
 const statusToIcon = {
   "n": <BrowserNotSupportedIcon color="disabled" />,
@@ -38,11 +39,6 @@ const statusToIcon = {
   "p": <HourglassBottomIcon color="disabled" />,
   "-": <Tooltip title='N/A'><BlockIcon color="disabled" /></Tooltip>,
   "info":<InfoIcon color="primary"/>
-}
-
-function status_combine(...args) {
-  const statuses = ["-", "p", "v", "n", "w", "i"];
-  return statuses[Math.max(...args.map(s => statuses.indexOf(s)))];
 }
 
 function wrap_status(status, href) {
@@ -90,13 +86,6 @@ const headCells = [
     id: 'filename',
     label: 'File Name',
   },
-  // {
-  //   id: 'syntax_and_schema',
-  //   label: 'IFC Syntax and Schema',
-  //   width: 100,
-  //   align: 'center',
-  //   tooltip: 'STEP Physical File Syntax / IFC Schema: inverse attributes, attribute types, cardinalities, where rules, function constraints'
-  // },
   {
     id: 'syntax',
     label: 'STEP Syntax',
@@ -125,12 +114,13 @@ const headCells = [
     align: 'center',
     tooltip: 'Checking the IFC file against common practice and sensible defaults. None of these checks render the IFC file invalid'
   },
-  {
-    id: 'bsdd',
-    label: 'bSDD Compliance',
-    width: 100,
-    align: 'center'
-  },
+  // disabled bSDD
+  // {
+  //   id: 'bsdd',
+  //   label: 'bSDD Compliance',
+  //   width: 100,
+  //   align: 'center'
+  // },
   {
     id: 'date',
     label: 'Date',
@@ -194,7 +184,7 @@ function EnhancedTableToolbar({ numSelected, onDelete, onRevalidate }) {
   return (
     <Toolbar
       sx={{
-        pl: { sm: 2 },
+        pl: { sm: 1 },
         pr: { xs: 1, sm: 1 },
         backgroundColor: "none",
         ...(numSelected > 0 && {
@@ -203,26 +193,6 @@ function EnhancedTableToolbar({ numSelected, onDelete, onRevalidate }) {
         }),
       }}
     >
-      {numSelected > 0 ? (
-        <Typography
-          sx={{ flex: '1 1 100%' }}
-          color="inherit"
-          variant="subtitle1"
-          component="div"
-        >
-          {numSelected} selected
-        </Typography>
-      ) : (
-        <Typography
-          sx={{ flex: '1 1 100%' }}
-          variant="h6"
-          id="tableTitle"
-          component="div"
-        >
-
-        </Typography>
-      )}
-
       {numSelected > 0 && (
         <Tooltip title="Delete">
           <IconButton onClick={onDelete}>
@@ -236,6 +206,25 @@ function EnhancedTableToolbar({ numSelected, onDelete, onRevalidate }) {
             <ReplayIcon />
           </IconButton>
         </Tooltip>)} */}
+
+      {numSelected > 0 ? (
+        <Typography
+          //sx={{ flex: '1 1 100%' }}
+          color="inherit"
+          variant="subtitle1"
+          component="div"
+        >
+          {numSelected} selected
+        </Typography>
+      ) : (
+        <Typography
+          // sx={{ flex: '1 1 100%' }}
+          variant="h6"
+          id="tableTitle"
+          component="div"
+        />
+      )}
+      
     </Toolbar>
   );
 }
@@ -315,7 +304,9 @@ export default function DashboardTable({ models }) {
   useEffect(() => {
     if (deleted) {
       fetch(`${FETCH_PATH}/api/delete/${deleted}`, {
-        method: 'POST'
+        method: 'DELETE',
+        headers: { 'x-csrf-token': getCookieValue('csrftoken') },
+        credentials: 'include'
       })
         .then((response) => response.json())
         .then((json) => {
@@ -324,7 +315,9 @@ export default function DashboardTable({ models }) {
         });
     } else if (revalidated) {
       fetch(`${FETCH_PATH}/api/revalidate/${revalidated}`, {
-        method: 'POST'
+        method: 'POST',
+        headers: { 'x-csrf-token': getCookieValue('csrftoken') },
+        credential: 'include'
       })
         .then((response) => response.json())
         .then((json) => {
@@ -408,9 +401,9 @@ export default function DashboardTable({ models }) {
                   <TableCell align="center">
                     {wrap_status(row.status_ind, context.sandboxId ? `/sandbox/report_industry/${context.sandboxId}/${row.code}` : `/report_industry/${row.code}`)}
                   </TableCell>
-                  <TableCell align="center">
+                  {/* <TableCell align="center">
                     {wrap_status(row.status_bsdd, context.sandboxId ? `/sandbox/report_bsdd/${context.sandboxId}/${row.code}` : `/report_bsdd/${row.code}`)}
-                  </TableCell>
+                  </TableCell> */}
                 
                   {
                     // (row.progress == 100) ?
