@@ -1,7 +1,9 @@
 import * as React from 'react';
 import { useEffect, useState } from 'react';
 import { TreeView, TreeItem } from '@mui/x-tree-view';
+import ErrorIcon from '@mui/icons-material/Error';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import Badge from '@mui/material/Badge';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import Checkbox from "@mui/material/Checkbox";
 import Tooltip from '@mui/material/Tooltip';
@@ -11,6 +13,7 @@ import TableCell from '@mui/material/TableCell';
 import TableContainer from '@mui/material/TableContainer';
 import TableHead from '@mui/material/TableHead';
 import TablePagination from '@mui/material/TablePagination';
+import WarningIcon from '@mui/icons-material/Warning';
 import { statusToColor, severityToLabel, statusToLabel, severityToColor } from './mappings';
 
 function unsafe_format(obj) {
@@ -177,8 +180,28 @@ export default function GherkinResult({ summary, content, status, instances }) {
     setGrouped(grouped)
   }, [page, content, checked]);
 
-  function getSuffix(rows) {
-    return (rows && rows.length > 0) ? '(failed ' + rows.length.toLocaleString() + ' times)' : ''
+  function getSuffix(rows, severity) {
+    let count = rows.length.toLocaleString();
+    let label = severityToLabel[severity];
+    let badgeColor;
+    if (label === 'Warning') {
+      badgeColor = 'warning';
+    }
+    if (label === 'Error') {
+      badgeColor = 'error';
+    }
+    return (rows && rows.length > 0) && (
+        (severity > 2 ) && (
+          <Badge
+              badgeContent={count}
+              color={badgeColor}
+              max={10}
+          >
+            { ( label === 'Warning' ) && <WarningIcon /> }
+            { (  label === 'Error'  ) && <ErrorIcon /> }
+          </Badge>
+    ))
+
   }
 
   return (
@@ -240,7 +263,7 @@ export default function GherkinResult({ summary, content, status, instances }) {
                   >
                     <TreeItem 
                       nodeId={feature} 
-                      label={<div class='caption'>{feature} <i>{getSuffix(rows)}</i></div>} 
+                      label={<div class='caption'>{feature} <i>{getSuffix(rows, severity)}</i></div>}
                       sx={{ "backgroundColor": severityToColor[severity] }}
                     >
                       <div>
