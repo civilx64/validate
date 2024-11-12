@@ -66,7 +66,8 @@ function unsafe_format(obj) {
       directionLabel = 'Gradient';
     }
     else {
-      directionLabel= '';
+      // warning is raised for position, so don't report any details of direction or gradient
+      directionLabel= 'suppress';
     }
 
     if ('continuity_details' in obj) {
@@ -76,11 +77,13 @@ function unsafe_format(obj) {
           <div>{ctx} {display_value}</div>
           <div>at end of {dts.previous_segment}</div>
           <ul>Coords: ({dts.preceding_end_point[0]}, {dts.preceding_end_point[1]})</ul>
-          <ul>{directionLabel}: {dts.preceding_end_direction}</ul>
+          { directionLabel !== 'suppress' && (
+            <ul>{directionLabel}: {dts.preceding_end_direction}</ul>) }
           <br />
           <div>and start of {dts.segment_to_analyze}</div>
           <ul>Coords: ({dts.current_start_point[0]}, {dts.current_start_point[1]})</ul>
-          <ul>{directionLabel}: {dts.current_start_direction}</ul>
+          { directionLabel !== 'suppress' && (
+          <ul>{directionLabel}: {dts.current_start_direction}</ul> )}
         </div>
       );
     } else {
@@ -174,8 +177,9 @@ export default function GherkinResult({ summary, content, status, instances }) {
     setGrouped(grouped)
   }, [page, content, checked]);
 
-  function getSuffix(rows) {
-    return (rows && rows.length > 0) ? '(failed ' + rows.length.toLocaleString() + ' times)' : ''
+  function getSuffix(rows, status) {
+    let times = (rows && rows.length > 1) ? ' times' : ' time';
+    return (rows && rows.length > 0 && rows[0].severity >= 4) ? '(failed ' + rows.length.toLocaleString() + times + ')' : '';
   }
 
   return (
@@ -214,6 +218,7 @@ export default function GherkinResult({ summary, content, status, instances }) {
           ".MuiTreeItem-content.Mui-expanded": { borderBottom: 'solid 1px black' },
           ".MuiTreeItem-group .MuiTreeItem-content.Mui-expanded": { borderBottom: 0 },
           ".caption" : { paddingTop: "1em", paddingBottom: "1em", textTransform: 'capitalize' },
+          ".caption-suffix" : { paddingTop: "1em", paddingBottom: "1em", fontSize: '0.9em', textTransform: 'none', fontStyle: 'italic' },
           ".subcaption" : { visibility: "hidden", fontSize: '80%' },
           ".MuiTreeItem-content.Mui-expanded .subcaption" : { visibility: "visible" },
           "table": { borderCollapse: 'collapse', fontSize: '80%' },
@@ -237,7 +242,7 @@ export default function GherkinResult({ summary, content, status, instances }) {
                   >
                     <TreeItem 
                       nodeId={feature} 
-                      label={<div class='caption'>{feature} <i>{getSuffix(rows)}</i></div>} 
+                      label={<div><div class='caption'>{feature} <span class='caption-suffix'>{getSuffix(rows, status)}</span></div></div>} 
                       sx={{ "backgroundColor": severityToColor[severity] }}
                     >
                       <div>
